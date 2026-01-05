@@ -3,22 +3,76 @@ import pandas as pd
 from google.oauth2.service_account import Credentials
 import gspread
 
+# =========================
+# 🔐 Simple Login (Amani + Manager)
+# =========================
+def require_login():
+    st.set_page_config(page_title="Task Dashboard", page_icon="✅", layout="wide")
+
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+        st.session_state["user"] = None
+
+    if st.session_state["authenticated"]:
+        return
+
+    st.title("🔐 Secure Access")
+    st.caption("Please login to access the task tracking dashboard.")
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    # Expect in Streamlit Secrets:
+    # [auth]
+    # username = "amani"
+    # password = "..."
+    # manager_username = "manager"
+    # manager_password = "..."
+    if "auth" not in st.secrets:
+        st.error("Missing [auth] in Streamlit Secrets. Add usernames/passwords under [auth].")
+        st.stop()
+
+    auth = st.secrets["auth"]
+    valid_users = {
+        auth.get("username"): auth.get("password"),
+        auth.get("manager_username"): auth.get("manager_password"),
+    }
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        login_clicked = st.button("Login", use_container_width=True)
+
+    if login_clicked:
+        if username in valid_users and password == valid_users.get(username):
+            st.session_state["authenticated"] = True
+            st.session_state["user"] = username
+            st.success("Logged in successfully ✅")
+            st.rerun()
+        else:
+            st.error("Invalid username or password")
+
+    st.stop()
+
+
+require_login()
+
 # ---------------------------
-# Page setup
+# Page setup (after login)
 # ---------------------------
-st.set_page_config(page_title="Task Dashboard", page_icon="✅", layout="wide")
 st.title("✅ Task Tracking Dashboard")
 st.caption("Powered by Google Sheets • Streamlit Cloud-ready")
+st.caption(f"Logged in as: **{st.session_state.get('user','')}**")
+
+# Logout button
+with st.sidebar:
+    if st.button("🚪 Logout"):
+        st.session_state["authenticated"] = False
+        st.session_state["user"] = None
+        st.rerun()
 
 # ---------------------------
 # Secrets & config
 # ---------------------------
-# Streamlit Secrets must include:
-# [gcp_service_account]  -> service account JSON fields as TOML keys
-# [sheets]
-# spreadsheet_id = "..."
-# worksheet_name = "Tasks" (optional; defaults to "Tasks")
-
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 if "gcp_service_account" not in st.secrets:
@@ -61,7 +115,7 @@ def load_tasks():
             df[col] = df[col].astype(str).fillna("").str.strip()
 
     # Parse dates if present
-    for col in ["Due Date", "Created At", "Updated At"]:
+    for col in ["Due Date", "Created At", "Updated At", "StartDate", "Deadline"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
@@ -127,7 +181,7 @@ done = count_status(filtered, "Done")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Total", total_tasks)
 c2.metric("Blocked", blocked)
-c3.metric("In Progress", in_progress)   # ✅ requested
+c3.metric("In Progress", in_progress)
 c4.metric("Done", done)
 
 st.divider()
@@ -138,15 +192,22 @@ st.divider()
 st.subheader("📋 Tasks")
 st.caption(f"Showing {len(filtered)} task(s) after filters.")
 
-preferred_order = ["Task", "Owner", "Project", "Status", "Priority", "Due Date", "Notes"]
+preferred_order = ["Task", "Owner", "Project", "Status", "Priority", "StartDate", "Deadline", "Due Date", "Latest Update", "Blockers", "Project Team", "Task ID", "Notes"]
 existing = [c for c in preferred_order if c in filtered.columns]
 rest = [c for c in filtered.columns if c not in existing]
 display_cols = existing + rest
 
 display_df = filtered[display_cols].copy()
 
-if "Due Date" in display_df.columns:
-    display_df = display_df.sort_values(by=["Due Date"], ascending=True, na_position="last")
+# Sort by deadline / due date if available
+sort_col = None
+for candidate in ["Deadline", "Due Date", "StartDate"]:
+    if candidate in display_df.columns:
+        sort_col = candidate
+        break
+
+if sort_col:
+    display_df = display_df.sort_values(by=[sort_col], ascending=True, na_position="last")
 
 st.dataframe(display_df, use_container_width=True, hide_index=True)
 
