@@ -1,138 +1,161 @@
 import streamlit as st
 import pandas as pd
-import gspread
 from google.oauth2.service_account import Credentials
+import gspread
 
-# =========================
-# CONFIG
-# =========================
-SPREADSHEET_NAME = "Team Task Tracker"
-TASKS_SHEET = "Tasks"
-SERVICE_ACCOUNT_FILE = "service_account.json"
+# ---------------------------
+# Page setup
+# ---------------------------
+st.set_page_config(page_title="Task Dashboard", page_icon="✅", layout="wide")
+st.title("✅ Task Tracking Dashboard")
+st.caption("Powered by Google Sheets • Streamlit Cloud-ready")
 
-# =========================
-# AUTH
-# =========================
-scopes = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+# ---------------------------
+# Secrets & config
+# ---------------------------
+# Streamlit Secrets must include:
+# [gcp_service_account]  -> service account JSON fields as TOML keys
+# [sheets]
+# spreadsheet_id = "..."
+# worksheet_name = "Tasks" (optional; defaults to "Tasks")
 
-creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
-client = gspread.authorize(creds)
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# =========================
-# LOAD DATA
-# =========================
-@st.cache_data(ttl=30)
+if "gcp_service_account" not in st.secrets:
+    st.error("❌ Missing `gcp_service_account` in Streamlit Secrets.")
+    st.stop()
+
+if "sheets" not in st.secrets or "spreadsheet_id" not in st.secrets["sheets"]:
+    st.error("❌ Missing `sheets.spreadsheet_id` in Streamlit Secrets.")
+    st.stop()
+
+SPREADSHEET_ID = st.secrets["sheets"]["spreadsheet_id"]
+WORKSHEET_NAME = st.secrets["sheets"].get("worksheet_name", "Tasks")
+
+# ---------------------------
+# Google Sheets helpers
+# ---------------------------
+@st.cache_resource
+def get_gspread_client():
+    """Create a cached gspread client using Streamlit Secrets."""
+    service_account_info = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+    return gspread.authorize(creds)
+
+@st.cache_data(ttl=60)
 def load_tasks():
-    ws = client.open(SPREADSHEET_NAME).worksheet(TASKS_SHEET)
-    df = pd.DataFrame(ws.get_all_records())
+    """Load tasks as a DataFrame from Google Sheets."""
+    client = get_gspread_client()
+    sh = client.open_by_key(SPREADSHEET_ID)
+    ws = sh.worksheet(WORKSHEET_NAME)
+    records = ws.get_all_records()
 
-    # Clean column names
-    df.columns = df.columns.astype(str).str.strip()
+    df = pd.DataFrame(records)
 
-    # Ensure columns exist
-    for col in ["Owner", "Project", "Status", "Deadline"]:
-        if col not in df.columns:
-            df[col] = ""
+    # Normalize column names
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Clean common text columns
+    for col in ["Task", "Owner", "Project", "Status", "Priority", "Notes"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).fillna("").str.strip()
+
+    # Parse dates if present
+    for col in ["Due Date", "Created At", "Updated At"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
 
     return df
 
-
-def status_rank(s):
-    if pd.isna(s):
-        return 99
-    s = str(s).strip().lower()
-    if s == "blocked":
+def count_status(df: pd.DataFrame, status_value: str) -> int:
+    if "Status" not in df.columns:
         return 0
-    if s == "in progress":
-        return 1
-    if s == "not started":
-        return 2
-    if s == "done":
-        return 3
-    return 50
+    return int((df["Status"].astype(str).str.strip().str.lower() == status_value.lower()).sum())
 
+# ---------------------------
+# Load data
+# ---------------------------
+try:
+    df = load_tasks()
+except gspread.exceptions.WorksheetNotFound:
+    st.error(
+        f"❌ Worksheet '{WORKSHEET_NAME}' not found.\n\n"
+        "Check the tab name in Google Sheets and the `worksheet_name` in secrets."
+    )
+    st.stop()
+except Exception as e:
+    st.error("❌ Could not load Google Sheet. Check: secrets, spreadsheet_id, and sharing permissions.")
+    st.exception(e)
+    st.stop()
 
-# =========================
-# UI
-# =========================
-st.set_page_config(page_title="Task Dashboard", layout="wide")
-st.title("📊 Task Dashboard")
+if df.empty:
+    st.info("No tasks found in the sheet yet.")
+    st.stop()
 
-df = load_tasks()
+# ---------------------------
+# Sidebar filters
+# ---------------------------
+st.sidebar.header("🔎 Filters")
 
-# =========================
-# KPI METRICS
-# =========================
-status_lower = df["Status"].astype(str).str.strip().str.lower()
+owners = sorted(df["Owner"].dropna().unique().tolist()) if "Owner" in df.columns else []
+projects = sorted(df["Project"].dropna().unique().tolist()) if "Project" in df.columns else []
+statuses = sorted(df["Status"].dropna().unique().tolist()) if "Status" in df.columns else []
 
-total_tasks = len(df)
-blocked_count = (status_lower == "blocked").sum()
-in_progress_count = (status_lower == "in progress").sum()
-done_count = (status_lower == "done").sum()
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Tasks", total_tasks)
-c2.metric("Blocked", int(blocked_count))
-c3.metric("In Progress", int(in_progress_count))
-c4.metric("Done", int(done_count))
-
-st.divider()
-
-# =========================
-# FILTERS
-# =========================
-owners = sorted([o for o in df["Owner"].dropna().unique() if str(o).strip()])
-projects = sorted([p for p in df["Project"].dropna().unique() if str(p).strip()])
-
-col1, col2 = st.columns(2)
-
-with col1:
-    selected_owner = st.selectbox("Select Owner", ["All"] + owners)
-
-with col2:
-    selected_project = st.selectbox("Select Project", ["All"] + projects)
+owner_filter = st.sidebar.multiselect("Owner", owners, default=owners)
+project_filter = st.sidebar.multiselect("Project", projects, default=projects)
+status_filter = st.sidebar.multiselect("Status", statuses, default=statuses)
 
 filtered = df.copy()
 
-if selected_owner != "All":
-    filtered = filtered[filtered["Owner"] == selected_owner]
+if "Owner" in filtered.columns and owner_filter:
+    filtered = filtered[filtered["Owner"].isin(owner_filter)]
 
-if selected_project != "All":
-    filtered = filtered[filtered["Project"] == selected_project]
+if "Project" in filtered.columns and project_filter:
+    filtered = filtered[filtered["Project"].isin(project_filter)]
 
-# =========================
-# SORTING (Blocked → In Progress → Not Started → Done)
-# =========================
-view = filtered.copy()
-view["__rank"] = view["Status"].apply(status_rank)
+if "Status" in filtered.columns and status_filter:
+    filtered = filtered[filtered["Status"].isin(status_filter)]
 
-view = view.sort_values(by=["__rank", "Deadline"], ascending=[True, True])
-view = view.drop(columns="__rank")
+# ---------------------------
+# KPI cards
+# ---------------------------
+total_tasks = len(filtered)
+blocked = count_status(filtered, "Blocked")
+in_progress = count_status(filtered, "In Progress")
+done = count_status(filtered, "Done")
 
-# =========================
-# TABLE
-# =========================
-display_cols = [
-    "Task ID",
-    "Task",
-    "Project",
-    "Owner",
-    "Status",
-    "StartDate",
-    "Deadline",
-    "Latest Update",
-    "Blockers",
-    "Project Team",
-]
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Total", total_tasks)
+c2.metric("Blocked", blocked)
+c3.metric("In Progress", in_progress)   # ✅ requested
+c4.metric("Done", done)
 
-display_cols = [c for c in display_cols if c in view.columns]
+st.divider()
 
-st.subheader("Tasks")
-st.dataframe(
-    view[display_cols],
-    use_container_width=True,
-    hide_index=True,
-)
+# ---------------------------
+# Tasks table
+# ---------------------------
+st.subheader("📋 Tasks")
+st.caption(f"Showing {len(filtered)} task(s) after filters.")
+
+preferred_order = ["Task", "Owner", "Project", "Status", "Priority", "Due Date", "Notes"]
+existing = [c for c in preferred_order if c in filtered.columns]
+rest = [c for c in filtered.columns if c not in existing]
+display_cols = existing + rest
+
+display_df = filtered[display_cols].copy()
+
+if "Due Date" in display_df.columns:
+    display_df = display_df.sort_values(by=["Due Date"], ascending=True, na_position="last")
+
+st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+# ---------------------------
+# Manual refresh button
+# ---------------------------
+st.sidebar.divider()
+if st.sidebar.button("🔄 Refresh now"):
+    st.cache_data.clear()
+    st.rerun()
+
+st.caption("Tip: Updates from Google Sheets may take up to ~60 seconds unless you click Refresh.")
