@@ -19,15 +19,10 @@ def require_login():
     st.title("🔐 Secure Access")
     st.caption("Please login to access the task tracking dashboard.")
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+    # Make browser password managers more likely to offer saving credentials
+    username = st.text_input("Username", autocomplete="username")
+    password = st.text_input("Password", type="password", autocomplete="current-password")
 
-    # Expect in Streamlit Secrets:
-    # [auth]
-    # username = "amani"
-    # password = "..."
-    # manager_username = "manager"
-    # manager_password = "..."
     if "auth" not in st.secrets:
         st.error("Missing [auth] in Streamlit Secrets. Add usernames/passwords under [auth].")
         st.stop()
@@ -46,7 +41,6 @@ def require_login():
         if username in valid_users and password == valid_users.get(username):
             st.session_state["authenticated"] = True
             st.session_state["user"] = username
-            st.success("Logged in successfully ✅")
             st.rerun()
         else:
             st.error("Invalid username or password")
@@ -57,7 +51,7 @@ def require_login():
 require_login()
 
 # ---------------------------
-# Page setup (after login)
+# Page header
 # ---------------------------
 st.title("✅ Task Tracking Dashboard")
 st.caption("Powered by Google Sheets • Streamlit Cloud-ready")
@@ -109,8 +103,8 @@ def load_tasks():
     # Normalize column names
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Clean common text columns
-    for col in ["Task", "Owner", "Project", "Status", "Priority", "Notes"]:
+    # Clean common text columns if present
+    for col in ["Task", "Owner", "Project", "Status", "Priority", "Notes", "Task ID", "Blockers", "Project Team", "Latest Update"]:
         if col in df.columns:
             df[col] = df[col].astype(str).fillna("").str.strip()
 
@@ -147,18 +141,31 @@ if df.empty:
     st.stop()
 
 # ---------------------------
-# Sidebar filters
+# Build filter options
 # ---------------------------
-st.sidebar.header("🔎 Filters")
-
 owners = sorted(df["Owner"].dropna().unique().tolist()) if "Owner" in df.columns else []
 projects = sorted(df["Project"].dropna().unique().tolist()) if "Project" in df.columns else []
 statuses = sorted(df["Status"].dropna().unique().tolist()) if "Status" in df.columns else []
 
-owner_filter = st.sidebar.multiselect("Owner", owners, default=owners)
-project_filter = st.sidebar.multiselect("Project", projects, default=projects)
-status_filter = st.sidebar.multiselect("Status", statuses, default=statuses)
+# ---------------------------
+# 🔽 TOP-OF-PAGE FILTERS (what you asked for)
+# ---------------------------
+st.subheader("Filters")
 
+col_a, col_b, col_c = st.columns(3)
+
+with col_a:
+    owner_filter = st.multiselect("Owner", owners, default=owners)
+
+with col_b:
+    project_filter = st.multiselect("Project", projects, default=projects)
+
+with col_c:
+    status_filter = st.multiselect("Status", statuses, default=statuses)
+
+# ---------------------------
+# Apply filters
+# ---------------------------
 filtered = df.copy()
 
 if "Owner" in filtered.columns and owner_filter:
@@ -192,7 +199,11 @@ st.divider()
 st.subheader("📋 Tasks")
 st.caption(f"Showing {len(filtered)} task(s) after filters.")
 
-preferred_order = ["Task", "Owner", "Project", "Status", "Priority", "StartDate", "Deadline", "Due Date", "Latest Update", "Blockers", "Project Team", "Task ID", "Notes"]
+preferred_order = [
+    "Task", "Owner", "Project", "Status", "Task ID",
+    "StartDate", "Deadline", "Due Date",
+    "Latest Update", "Blockers", "Project Team", "Priority", "Notes"
+]
 existing = [c for c in preferred_order if c in filtered.columns]
 rest = [c for c in filtered.columns if c not in existing]
 display_cols = existing + rest
@@ -212,10 +223,10 @@ if sort_col:
 st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 # ---------------------------
-# Manual refresh button
+# Manual refresh button (main page)
 # ---------------------------
-st.sidebar.divider()
-if st.sidebar.button("🔄 Refresh now"):
+st.write("")
+if st.button("🔄 Refresh now"):
     st.cache_data.clear()
     st.rerun()
 
